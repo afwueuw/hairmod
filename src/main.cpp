@@ -40,7 +40,8 @@ namespace HPUI
         std::array<std::optional<float>, Rows> queued{};
         std::optional<std::pair<int, float>> activeEdit;
         bool valid = false;
-        bool busy = false;
+        bool busy = false;          // Any Papyrus request is in flight; serializes VM calls.
+        bool mutationBusy = false;  // True only while a request changes HairPositioner values.
         bool resetQueued = false;
         bool refresh = true;
         bool beginSession = true;
@@ -256,9 +257,18 @@ namespace HPUI
             !source.presetApplyQueue.empty() || !source.presetCaptureQueue.empty() ||
             std::any_of(source.queued.begin(), source.queued.end(), [](const auto& v) { return v.has_value(); });
     }
+
+    // Read-only SnapshotV2 calls must not gray out the whole UI. Keep controls interactive
+    // during a snapshot refresh, while still locking them for edits/restores and catalog scans.
+    bool InteractionPending(const State& source) {
+        return source.mutationBusy || source.resetQueued || source.restoreQueued || source.restoreActive ||
+            !source.presetApplyQueue.empty() || !source.presetCaptureQueue.empty() ||
+            std::any_of(source.queued.begin(), source.queued.end(), [](const auto& v) { return v.has_value(); });
+    }
+
     void QueueRestore(const Target& expected, bool undo) {
         std::scoped_lock lock(stateMutex);
-        if (Pending(state) || state.beginSession || !state.valid || !state.selected.Same(expected)) { return; }
+        if (InteractionPending(state) || state.catalogBusy || state.beginSession || !state.valid || !state.selected.Same(expected)) { return; }
         auto& history = state.histories[Identity(expected)];
         if (!history.baseline || (undo && history.undo.empty())) { return; }
         const auto before = EffectiveValues(state);
@@ -394,6 +404,7 @@ namespace HPUI
                     }
                 }
                 state.busy = false;
+                state.mutationBusy = false;
                 state.activeEdit.reset();
                 state.restoreActive.reset();
                 state.lastReply = Clock::now();
@@ -460,7 +471,7 @@ namespace HPUI
             {
                 std::scoped_lock lock(stateMutex);
                 if (epoch_ != state.generation) { return; }
-                state.busy = false; state.catalogBusy = false;
+                state.busy = false; state.mutationBusy = false; state.catalogBusy = false;
                 state.lastCatalog = state.lastReply = Clock::now();
                 if (good) {
                     bool changed = state.targets.size() != targets.size() ||
@@ -482,11 +493,16 @@ namespace HPUI
                     }
                     std::erase_if(state.presetApplyQueue, [&](const auto& item) { return !currentIDs.contains(Identity(item.target)); });
                     state.targets = std::move(targets);
+                    // A catalog refresh only needs a value snapshot if the current selection
+                    // is not initialized or no longer exists. Do not re-read values merely
+                    // because the equipped-item list was checked.
+                    bool selectionNeedsSnapshot = !state.valid;
                     auto current = std::find_if(state.targets.begin(), state.targets.end(), [](const auto& t) { return t.Same(state.selected); });
                     if (current != state.targets.end()) { state.selected = *current; }
                     else {
                         state.selected = state.targets.empty() ? Target{} : state.targets.front();
                         state.valid = false;
+                        selectionNeedsSnapshot = !state.targets.empty();
                     }
                     if (presetEnabled.load()) {
                         for (const auto& candidate : toApply) {
@@ -497,7 +513,8 @@ namespace HPUI
                             }
                         }
                     }
-                    state.error.clear(); state.refresh = true;
+                    state.error.clear();
+                    state.refresh = state.refresh || selectionNeedsSnapshot;
                 } else { state.error = "부위 목록 응답 오류: 새 DLL과 HPUIBridge.pex를 함께 설치하세요."; }
             }
             Pump();
@@ -574,17 +591,24 @@ namespace HPUI
             const bool visible = window && window->IsOpen.load();
             auto edited = state.histories.find(Identity(state.selected));
             bool recentEdit = edited != state.histories.end() && Now() - edited->second.lastChange < .4;
-            constexpr auto pollInterval = 5s;
+            // Equipped-item inventory is checked periodically so newly equipped/removed items
+            // eventually appear in the selector. This read-only catalog query is independent of
+            // value snapshots and does not force values to be read when the selected target stays.
+            constexpr auto catalogPollInterval = 10s;
             catalog = !presetWorkDeferred && !recentEdit && !manipulating.load() && !restore && !reset && row < 0 && !autoApply && !capture &&
-                (state.catalogRefresh || Clock::now() - state.lastCatalog >= pollInterval);
+                (state.catalogRefresh || Clock::now() - state.lastCatalog >= catalogPollInterval);
+            // SnapshotV2 is event-driven: opening the UI, selecting a target, pressing the
+            // manual refresh button, or discovering that the selected target changed. A user edit
+            // already returns an updated snapshot in its callback, so never poll values on a timer.
             if (presetWorkDeferred || (!restore && !reset && row < 0 && !autoApply && !capture && !catalog &&
-                (!visible || (!state.refresh && Clock::now() - state.lastReply < 1s)))) {
+                (!visible || !state.refresh || state.targets.empty()))) {
                 return;
             }
             if (catalog) { state.catalogRefresh = false; }
             state.catalogBusy = catalog;
             state.refresh = false;
             state.busy = true;
+            state.mutationBusy = row >= 0 || reset || restore.has_value() || autoApply.has_value();
             state.started = Clock::now();
             epoch = state.generation;
             target = autoApply ? autoApply->target : capture ? *capture : state.selected;
@@ -619,6 +643,7 @@ namespace HPUI
                 std::scoped_lock lock(stateMutex);
                 if (epoch != state.generation) { return; }
                 state.busy = false;
+                state.mutationBusy = false;
                 state.catalogBusy = false;
                 if (catalog) { state.lastCatalog = Clock::now(); }
                 state.activeEdit.reset();
@@ -634,7 +659,7 @@ namespace HPUI
     void __stdcall RenderWindow() {
         ImGui::SetNextWindowSize({510.f, 650.f}, ImGui::ImGuiCond_FirstUseEver);
         bool open = window->IsOpen.load();
-        if (!ImGui::Begin("부위·파츠 조절 · 1.1.0##HairPositionerUI", &open, ImGui::ImGuiWindowFlags_NoScrollWithMouse)) {
+        if (!ImGui::Begin("부위·파츠 조절 · 1.1.2##HairPositionerUI", &open, ImGui::ImGuiWindowFlags_NoScrollWithMouse)) {
             manipulating = false;
             ImGui::End(); window->IsOpen = open; Pump(); return;
         }
@@ -644,8 +669,8 @@ namespace HPUI
         State view;
         { std::scoped_lock lock(stateMutex); view = state; }
         ImGui::TextUnformatted("플레이어 부위·파츠 · HairPositioner 2.5");
-        bool pending = Pending(view);
-        ImGui::BeginDisabled(pending || view.targets.empty());
+        bool pending = InteractionPending(view);
+        ImGui::BeginDisabled(pending || view.catalogBusy || view.targets.empty());
         ImGui::SetNextItemWidth(340.f);
         if (ImGui::BeginCombo("조절 대상", view.targets.empty() ? "조절 대상 없음 / 목록 확인 중" : view.selected.name.c_str())) {
             for (std::size_t index = 0; index < view.targets.size(); ++index) {
@@ -654,7 +679,7 @@ namespace HPUI
                 if (ImGui::Selectable(target.name.c_str(), target.Same(view.selected))) {
                     std::scoped_lock lock(stateMutex);
                     // A background refresh can finish between the frame snapshot and click.
-                    if (!Pending(state) &&
+                    if (!InteractionPending(state) && !state.catalogBusy &&
                         std::any_of(state.targets.begin(), state.targets.end(), [&](const auto& t) { return t.Same(target); })) {
                         state.histories[Identity(state.selected)].EndGesture();
                         state.selected = target;
@@ -667,9 +692,11 @@ namespace HPUI
             ImGui::EndCombo();
         }
         ImGui::EndDisabled();
+        ImGui::BeginDisabled(view.catalogBusy);
         if (ImGui::Button("부위 목록 새로 읽기")) {
             std::scoped_lock lock(stateMutex); state.catalogRefresh = true;
         }
+        ImGui::EndDisabled();
         ImGui::TextUnformatted("헤어 · 수염 · 추가 머리 파츠 · 착용 장비/가발");
         if (!inGame.load()) { ImGui::TextUnformatted("세이브를 불러온 뒤 사용하세요."); }
         else if (!view.valid) { ImGui::TextUnformatted("현재값을 읽는 중..."); }
@@ -763,10 +790,10 @@ namespace HPUI
         ImGui::EndDisabled();
         ImGui::Text("이 부위 실행 취소: %u회 · 창을 다시 열면 새 시작값", static_cast<unsigned>(undoCount));
         if (ImGui::Button("현재값 새로 읽기")) { std::scoped_lock lock(stateMutex); state.refresh = true; }
-        ImGui::TextUnformatted(view.busy ? "값 전달 중..." : "게임 저장과 별개인 외부 프리셋에도 자동 저장됩니다.");
+        ImGui::TextUnformatted(view.mutationBusy ? "값 변경 적용 중..." : "게임 저장과 별개인 외부 프리셋에도 자동 저장됩니다.");
         ImGui::Separator();
         bool externalPresets = presetEnabled.load();
-        ImGui::BeginDisabled(Pending(view));
+        ImGui::BeginDisabled(pending || view.catalogBusy);
         if (ImGui::Checkbox("외부 프리셋 자동 저장 / 새 게임 자동 적용", &externalPresets)) {
             const auto text = std::to_wstring(externalPresets ? 1 : 0);
             if (WritePrivateProfileStringW(L"Persistence", L"Enabled", text.c_str(), settingsPath.c_str())) {
@@ -786,7 +813,7 @@ namespace HPUI
         ImGui::EndDisabled();
         ImGui::Text("외부 프리셋 파일 · 저장된 대상 %u개", static_cast<unsigned>(PresetCount()));
         const bool targetAvailable = view.valid && view.snapshot[10] > .5f && view.snapshot[11] > .5f && view.snapshot[12] > .5f && !view.selected.presetKey.empty();
-        ImGui::BeginDisabled(!externalPresets || !targetAvailable || Pending(view));
+        ImGui::BeginDisabled(!externalPresets || !targetAvailable || pending || view.catalogBusy);
         if (ImGui::Button("현재 대상값 외부 파일에 저장")) {
             if (StorePreset(view.selected.presetKey, Values(view.snapshot))) {
                 SKSE::log::info("Manually captured preset for {}", view.selected.presetKey);
@@ -794,18 +821,18 @@ namespace HPUI
         }
         ImGui::SameLine();
         const bool hasSelectedPreset = HasPreset(view.selected.presetKey);
-        ImGui::BeginDisabled(!hasSelectedPreset || !targetAvailable || Pending(view));
+        ImGui::BeginDisabled(!hasSelectedPreset || !targetAvailable || pending || view.catalogBusy);
         if (ImGui::Button("이 대상 프리셋 다시 적용")) {
             if (auto values = FindPreset(view.selected.presetKey)) {
                 std::scoped_lock lock(stateMutex);
-                if (!Pending(state) && !state.beginSession && state.valid && state.selected.Same(view.selected)) {
+                if (!InteractionPending(state) && !state.catalogBusy && !state.beginSession && state.valid && state.selected.Same(view.selected)) {
                     state.restoreQueued = State::Restore{*values, EffectiveValues(state), false};
                 }
             }
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::BeginDisabled(!hasSelectedPreset || Pending(view));
+        ImGui::BeginDisabled(!hasSelectedPreset || pending || view.catalogBusy);
         if (ImGui::Button("이 대상 프리셋 삭제")) {
             if (DeletePreset(view.selected.presetKey)) {
                 SKSE::log::info("Deleted external preset for {}", view.selected.presetKey);
@@ -815,10 +842,10 @@ namespace HPUI
         }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
-        ImGui::BeginDisabled(!externalPresets || Pending(view) || view.targets.empty());
+        ImGui::BeginDisabled(!externalPresets || pending || view.catalogBusy || view.targets.empty());
         if (ImGui::Button("현재 목록의 모든 대상값을 외부 파일에 저장")) {
             std::scoped_lock lock(stateMutex);
-            if (!Pending(state)) {
+            if (!InteractionPending(state) && !state.catalogBusy) {
                 state.presetCaptureQueue.assign(state.targets.begin(), state.targets.end());
                 state.presetStatus = "현재 목록의 값들을 하나씩 읽어 외부 프리셋으로 저장합니다.";
             }
@@ -935,7 +962,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* skse)
     spdlog::set_level(spdlog::level::info);
     spdlog::flush_on(spdlog::level::info);
     SKSE::Init(skse, false);
-    SKSE::log::info("HairPositionerUI 1.1.0: external preset auto-save/apply, wheel, undo; default F3");
+    SKSE::log::info("HairPositionerUI 1.1.2: event-driven value refresh, external presets, wheel, undo; default F3");
     HPUI::LoadHotkey();
     HPUI::InitPresetStore();
     return SKSE::GetMessagingInterface()->RegisterListener(HPUI::Message);

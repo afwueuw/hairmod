@@ -143,4 +143,9 @@ UI를 제거해도 적용한 값은 원본 HairPositioner에 남습니다. 기�
 - SKSE Menu Framework API: https://github.com/QTR-Modding/SKSE-Menu-Framework-3-API
 - CommonLibSSE-NG: https://github.com/alandtse/CommonLibVR
 
-이 UI의 수정 소스는 `HairPositionerUI-1.1.0-source.zip`으로 제공합니다. `.github/workflows/build.yml`이 Windows GitHub Actions에서 DLL을 빌드합니다. 라이선스와 관련 고지는 배포본의 `licenses` 폴더를 확인해 주세요. 원본 HairPositioner, RaceMenu, SKSE Menu Framework는 별도로 설치해야 하며 배포 ZIP에 포함되지 않습니다.
+이 UI의 수정 소스는 `HairPositionerUI-1.1.2-source.zip`으로 제공합니다. `.github/workflows/build.yml`이 Windows GitHub Actions에서 DLL을 빌드합니다. 라이선스와 관련 고지는 배포본의 `licenses` 폴더를 확인해 주세요. 원본 HairPositioner, RaceMenu, SKSE Menu Framework는 별도로 설치해야 하며 배포 ZIP에 포함되지 않습니다.
+
+
+## 1.1.2 event-driven value refresh
+
+Value snapshots are no longer polled on a timer. They are requested when the UI opens, when the selected target changes, when the user presses the manual refresh button, or when a catalog scan discovers that the current target changed. A successful user edit returns the current values directly. Equipped-item catalog polling remains at about every 10 seconds so the list can detect equipment changes; after equipping or removing an item, use the manual list refresh for an immediate update. During that scan, only the target selector and value-edit controls that depend on the catalog are briefly locked; unrelated UI actions remain available. If another mod changes values externally, use the manual value refresh button.

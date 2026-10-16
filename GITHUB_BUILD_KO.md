@@ -17,3 +17,15 @@
 - 이 저장소의 Actions가 생성하는 것은 `HairPositionerUI.dll`뿐입니다. 기존 `Scripts/HPUIBridge.pex`는 그대로 둡니다.
 - GitHub Actions 빌드 성공은 실제 Skyrim 실행 테스트와 같지 않습니다. 게임에서 테스트하지 않은 상태이므로, 문제가 생기면 `Documents/My Games/Skyrim Special Edition/SKSE/HairPositionerUI.log`를 확인하세요.
 - 모드 파일을 공개 저장소로 게시하면 소스가 공개됩니다. 혼자 사용하려면 Private 저장소를 선택하세요.
+
+## 이미 GitHub 저장소를 만들어 둔 경우 (1.1.2 업데이트)
+
+새 저장소를 만들 필요가 없습니다. `HairPositionerUI-1.1.2-github-patch.zip`을 압축 해제한 뒤, GitHub Desktop으로 열어 둔 기존 저장소 폴더 안에 같은 경로로 파일을 덮어씁니다. 필수 변경 파일은 `src/main.cpp`와 `xmake.lua`입니다. 안내 문서도 최신화하려면 ZIP의 Markdown 파일을 함께 덮어써도 됩니다.
+
+1. GitHub Desktop에서 변경 파일 목록을 확인합니다.
+2. Summary에 `Fix UI refresh flicker`라고 입력하고 **Commit to main**을 누릅니다.
+3. **Push origin**을 눌러 GitHub에 올립니다.
+4. 워크플로는 `src/**` 또는 `xmake.lua` 변경으로 자동 실행되어야 합니다. 실행되지 않으면 **Actions → Build HairPositionerUI → Run workflow**를 선택합니다.
+5. 성공한 실행의 `HairPositionerUI-DLL` 아티팩트를 다운로드합니다. 기존 DLL을 백업한 다음 새 DLL로 교체하세요.
+
+이 수정은 소스 코드 변경입니다. 이 ZIP에는 사전 컴파일된 DLL이 포함되어 있지 않습니다.
