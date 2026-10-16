@@ -1,0 +1,42 @@
+name: Build HairPositionerUI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'lib/commonlibsse-ng/**'
+      - 'xmake.lua'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Set up xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: '3.1.0'
+
+      - name: Configure plugin
+        shell: pwsh
+        run: xmake f -m releasedbg -a x64 --vs=2022 -y
+
+      - name: Build DLL
+        shell: pwsh
+        run: xmake build -j2 HairPositionerUI
+
+      - name: Upload plugin DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: HairPositionerUI-DLL
+          path: build/bin/HairPositionerUI.dll
+          if-no-files-found: error
